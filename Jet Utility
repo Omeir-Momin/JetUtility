@@ -1,0 +1,289 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Sun Jul 19 09:42:23 2020
+
+@author: MOMENO
+
+important notes
+===============
+
+1. Hgas is set to zero
+
+2. Qwall and Qgen not set
+
+3. Cp Calculated at Reservoir Conditions
+ 
+"""
+
+
+def GetGasProperties(Select_Gas):
+    import csv
+    import numpy as np
+    #Import Gas Properties from Properties.csv file. File Must be placed in ACtive Dir
+    Gas_Data = list(csv.reader(open('Properties.csv')))
+    Gas_Names = [ Gas_Data[i][0] for i in range(len(Gas_Data))]
+    #Get the properties for this Gas
+    Gas_Index=Gas_Names.index(Select_Gas)
+    Gas_Properties = Gas_Data[Gas_Index]
+    #Delete Name of Gas from Array
+    del Gas_Properties[0]
+    #Return_Properties = [float(i) for i in Gas_Properties]
+    Return_Properties = np.array(Gas_Properties,dtype=np.float64)
+    return Return_Properties
+
+def CalcCp(AENT,BENT,DENT,TEMP):
+    Cp = AENT + BENT * TEMP  # Based on the definition of FLACS
+    return Cp
+
+def CalcCv(WFUEL,AENT,BENT,DENT,TEMP):
+    Cv = CalcCp(AENT,BENT,DENT,TEMP) - CalcRgas(WFUEL)
+    return Cv
+
+'''def CalcEnthalpy(AENT,BENT,DENT,TEMP):   
+    Hgas = AENT * TEMP + BENT * TEMP * TEMP / 2 - DENT # Based on the definition of FLACS
+    return Hgas'''
+
+def CalcRgas(WFUEL):
+    Rgas = 8314 / WFUEL
+    return Rgas
+
+def CalcSpHeatRatio(WFUEL,AENT,BENT,DENT,TEMP):
+    SpHeatRatio=CalcCp(AENT,BENT,DENT,TEMP)/CalcCv(WFUEL,AENT,BENT,DENT,TEMP)
+    return SpHeatRatio
+
+def CalcDensity(PRESS,TEMP,WFUEL):
+    Rgas = CalcRgas(WFUEL)
+    Density = PRESS / ( Rgas * TEMP )   
+    return Density
+
+def CalcSonicVel(Gamma,Rgas,Temperature):
+    import math
+    SonicVal = math.sqrt(Gamma * Rgas * Temperature)
+    return SonicVal
+
+def CalcOrificeConditions(WFUEL,AENT,BENT,DENT,Rgas,Current_Reservoir_Conditions):
+    SpHeatRatio = CalcSpHeatRatio(WFUEL,AENT,BENT,DENT,Current_Reservoir_Conditions[3])
+    Current_Orifice_Temperature = Current_Reservoir_Conditions[2] * 2 / (SpHeatRatio + 1)
+    Current_Orifice_Pressure = Current_Reservoir_Conditions[1] * ( 2 / (SpHeatRatio + 1) ) ** (SpHeatRatio / (SpHeatRatio - 1))
+    Current_Orifice_Density = Current_Orifice_Pressure / (Rgas * Current_Orifice_Temperature)
+    ###print('T2 = ',Current_Orifice_Temperature, 'P2 = ', Current_Orifice_Pressure, 'd2 =',Current_Orifice_Density)
+    Current_Orifice_Velocity = CalcSonicVel(SpHeatRatio,Rgas,Current_Orifice_Temperature)
+    Current_Orifice_MassFlow =  Current_Orifice_Density * Current_Orifice_Velocity * Area_orifice
+    return [Current_Reservoir_Conditions[0],Current_Orifice_Pressure, Current_Orifice_Temperature, Current_Orifice_Density, Current_Orifice_Velocity,Current_Orifice_MassFlow]
+
+def CalcReservoirConditions(InitCondReservoir,InitCondOrifice,Vo,dt,WFUEL,AENT,BENT,DENT):
+    Rgas  = CalcRgas(WFUEL)
+    Cpgas = CalcCp(AENT, BENT, DENT, InitCondReservoir[2])
+    Hgas = 0 #Cpgas * InitCondReservoir[2] * InitCondOrifice[5] * dt
+    Current_Time = InitCondReservoir[0] + dt
+    Current_Reservoir_Mass = InitCondReservoir[4] - InitCondOrifice[5] * dt
+    Current_Reservoir_Density = Current_Reservoir_Mass / Vo
+    Current_Reservoir_Temperature = InitCondReservoir[2]-(InitCondOrifice[5] * Hgas) / ( Cpgas * InitCondReservoir[4])
+    Current_Reservoir_Pressure = Current_Reservoir_Density * Rgas * Current_Reservoir_Temperature
+    return [Current_Time,Current_Reservoir_Pressure,Current_Reservoir_Temperature,Current_Reservoir_Density,Current_Reservoir_Mass]
+
+def CalcExitConditions(Patm,Orifice_Conditions,Gamma,Cp,Rgas):# Gamma and Cp Properties at Reservoir Conditions
+    import math
+    # Guess Values
+    P2 = Patm
+    M2 = 1.0
+    M3 = 1.0
+    Error = 1
+    Iter = 0
+    time1,P1,T1,d1,u1,m_dot_1=Orifice_Conditions
+    u2_max = math.sqrt( 2 * T1 * Cp + u1 ** 2)
+     
+    # Solve Ittiratively
+    while ( (abs(Error) > 0.01) and (Iter<50) ):
+        
+        P2 = Patm * M3 * math.sqrt((2 + M3 * M3 * (Gamma - 1)) / (2 + M2 * M2 * (Gamma - 1))) / M2
+        u2 = u1 + (P1 - P2)/(d1 * u1)
+        u2 = max(u2,u1)
+        u2 = min(u2, u2_max)
+        T2 = T1 +  (u1 * u1 - u2 * u2) / Cp /2
+        c2 = math.sqrt(Gamma * Rgas * T2)
+        M2 = u2 / c2
+        M3 = math.sqrt((M2 * M2 * (Gamma - 1) + 2) / (2 * Gamma * M2 * M2 - (Gamma - 1) ))
+        Error = P2 - ( Patm * M3 * math.sqrt((2 + M3 * M3 * (Gamma - 1)) / (2 + M2 * M2 * (Gamma - 1))) / M2 )
+        #print("Iter =",Iter, ' | u2 = %.2f' % u2,' | P2 = %.2f' % P2 , ' | T2 = %.2f' % T2, ' | c2 = %.2f' % c2, ' | M2 = %.2f' % M2, ' | M3 = %.2f' % M3,' | Residb = %.2f'% Error)
+        
+        Iter += 1
+    d2 = P2 / Rgas / T2
+    T3 = T2 * (2 + (Gamma - 1) * M2 ** 2) / (2 + (Gamma - 1) * M3 ** 2)
+    c3 = math.sqrt(Gamma * Rgas * T3)
+    u3 = c3 * M3
+    d3 = Patm / Rgas / T3
+    A3 = m_dot_1 / d3 / u3
+    #print('Solution is Converged')
+    #print(P2,u2,T2,c2,M2,M3)
+    
+    return [[time1,P2,T2,d2,u2,c2,M2],[time1,T3,u3,A3,d3,c3,M3]]
+
+
+
+
+import matplotlib.pyplot as plt
+
+WFUEL,LDENS,AENT,BENT,DENT,TCRIT,PCRIT=GetGasProperties('CO')
+
+Patm = 101325
+
+Vo = 1000 #Reservoir Volume
+Po = 100e5+Patm
+To = 288
+Dnoz = 0.05
+Cd = 1
+Start_Time = 0
+
+dt_max = 01.0
+Iter_Max=20
+Pshutoff = Patm + 0.01
+
+Twall = 0
+hwall = 0
+Qgen = 0
+
+End_Time = dt_max*Iter_Max
+
+#Current_Pressure = Po
+IterCount = 1
+
+
+Rgas = CalcRgas(WFUEL)
+Area_orifice = Cd * 3.1415 * Dnoz * Dnoz / 4
+
+
+
+Reservoir_Conditions=[['Time' , 'Pressure' , 'Temperature' , 'Density' , 'Mass']]
+Reservoir_Conditions.append([Start_Time, Po , To , CalcDensity(Po, To, WFUEL) , Vo * CalcDensity(Po, To, WFUEL)])
+
+Orifice_Conditions=[['Time' , 'Pressure' , 'Temperature' , 'Density' , 'Velocity' , 'Mass Flow Rate' ]]
+Orifice_Conditions.append(CalcOrificeConditions(WFUEL,AENT,BENT,DENT,Rgas,Reservoir_Conditions[IterCount]))
+
+PreMachDisk_Conditions = [['Time', 'Pressure', 'Temperature', 'Density', 'Velocity', 'Sonic Velocity', 'Mach Number']]
+Effective_Source=[['Time','Temperature','Velocity','Area','Density','Sonic Velocity','Mach Number']]
+
+[Temp_PreMachDisk_Conditions,Temp_Effective_Source] = CalcExitConditions(Patm, Orifice_Conditions[1],CalcSpHeatRatio(WFUEL, AENT, BENT, DENT, Reservoir_Conditions[1][2]), CalcCp(AENT, BENT, DENT, Reservoir_Conditions[1][2]) , Rgas)
+PreMachDisk_Conditions.append(Temp_PreMachDisk_Conditions)
+Effective_Source.append(Temp_Effective_Source)
+
+#dt = min(dt_max, 0.05 * Reservoir_Conditions[IterCount][4] / Orifice_Conditions[IterCount][5])
+dt = dt_max
+
+
+ 
+
+while ((Reservoir_Conditions[IterCount][1]>Pshutoff) and (Reservoir_Conditions[IterCount][0]<End_Time) and (IterCount<Iter_Max) ): #and (Reservoir_Conditions[IterCount][4] > (Orifice_Conditions[IterCount][5] * dt))
+    
+    Reservoir_Conditions.append(CalcReservoirConditions(Reservoir_Conditions[IterCount], Orifice_Conditions[IterCount], Vo, dt, WFUEL, AENT, BENT, DENT))
+    #print("Reservoir Conditions")
+   # print(Reservoir_Conditions)
+    IterCount += 1
+      
+    Orifice_Conditions.append(CalcOrificeConditions(WFUEL,AENT,BENT,DENT,Rgas,Reservoir_Conditions[IterCount]))
+    #print("Orifice Conditions")
+    #print(Orifice_Conditions)
+    [Temp_PreMachDisk_Conditions,Temp_Effective_Source] = CalcExitConditions(Patm, Orifice_Conditions[IterCount],CalcSpHeatRatio(WFUEL, AENT, BENT, DENT, Reservoir_Conditions[IterCount][2]), CalcCp(AENT, BENT, DENT, Reservoir_Conditions[IterCount][2]) , Rgas)
+    PreMachDisk_Conditions.append(Temp_PreMachDisk_Conditions)
+    Effective_Source.append(Temp_Effective_Source)
+    
+   # print("PreMachDisk Conditions")
+    #print(PreMachDisk_Conditions)
+    #print("Effective Source")
+    #print(Effective_Source)
+        
+    # Calculate time step for next step
+    #dt = min(dt_max, 0.05 * Reservoir_Conditions[IterCount][4] / Orifice_Conditions[IterCount][5])
+
+Time_Vector =  [Reservoir_Conditions[i][0] for i in range(len(Reservoir_Conditions))]   
+del(Time_Vector[0])
+Reservoir_Pressure = [Reservoir_Conditions[i][2] for i in range(len(Reservoir_Conditions))]
+del(Reservoir_Pressure[0])
+
+    
+#plt.plot(Time_Vector,Reservoir_Pressure,'bo')
+#plt.show()
+
+print('Source Conditions☺')  
+print('{:^8} | {:^8.4} | {:^8.8} | {:^8.3} | {:6}'.format(Effective_Source[0][0],Effective_Source[0][3],'Rate',Effective_Source[0][2],Effective_Source[0][1]))
+for i in range(1,len(Effective_Source)): 
+    print('{:8.2f} | {:8.6f} | {:8.2f} | {:8.2f} | {:8.3f} '.format(Effective_Source[i][0],Effective_Source[i][3],Orifice_Conditions[i][5],Effective_Source[i][2],Effective_Source[i][1]))
+               
+
+
+
+
+'''print("Reservoir Conditions")
+print(Reservoir_Conditions)
+print("Orifice Conditions")
+print(Orifice_Conditions)
+print("PreMachDisk Conditions")
+print(PreMachDisk_Conditions)
+print("Effective Source")
+print(Effective_Source)
+'''
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   
+'''
+    # Calculate Orifice Conditions at Current Time
+    SpHeatRatio = CalcSpHeatRatio(WFUEL,AENT,BENT,DENT,Reservoir_Conditions[IterCount][3])
+    Current_Orifice_Temperature = Reservoir_Conditions[IterCount][3] * 2 / (SpHeatRatio + 1)
+    Current_Orifice_Pressure = Reservoir_Conditions[IterCount][2] * ( 2 / (SpHeatRatio + 1) ) ** (SpHeatRatio / (SpHeatRatio - 1))
+    Current_Orifice_Density = Current_Orifice_Pressure / (Rgas * Current_Orifice_Temperature)
+    Current_Orifice_Velocity = CalcSonicVel(SpHeatRatio,Rgas,Current_Orifice_Temperature)
+    Current_Orifice_MassFlow =  Current_Orifice_Density * Current_Orifice_Velocity * Area_orifice
+    Orifice_Conditions.append([Current_Time, Current_Orifice_Pressure, Current_Orifice_Temperature, Current_Orifice_Density, Current_Orifice_Velocity, Current_Orifice_MassFlow])
+'''
+
+
+
+
+"""
+TEMP = 300
+PRESS = 101325
+Cp=CalcCp(AENT,BENT,DENT,TEMP)
+Cv=CalcCv(WFUEL,AENT,BENT,DENT,TEMP)
+Hgas=CalcEnthalpy(AENT,BENT,DENT,TEMP)
+Rgas = CalcRgas(WFUEL)
+SpHeatRatio = CalcSpHeatRatio(WFUEL,AENT,BENT,DENT,TEMP)
+Density=CalcDensity(PRESS,TEMP,WFUEL)
+print('Mol. Wt. = ' + str(WFUEL))
+print('Rgas = ' + str(Rgas))
+print('SpHeat_V = ' + str(Cv))
+print('SpHeat_P = ' + str(Cp))
+print('SpHeatRatio = ' + str(SpHeatRatio))
+print('Density = ' + str(Density))
+"""
